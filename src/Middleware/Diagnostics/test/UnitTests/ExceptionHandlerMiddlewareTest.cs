@@ -3,6 +3,7 @@
 
 using System.Diagnostics;
 using System.Diagnostics.Metrics;
+using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
@@ -11,19 +12,22 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.Features;
+using Microsoft.AspNetCore.InternalTesting;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Routing;
+using Microsoft.AspNetCore.Routing.Patterns;
 using Microsoft.AspNetCore.TestHost;
-using Microsoft.AspNetCore.Testing;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Diagnostics.Metrics;
+using Microsoft.Extensions.Diagnostics.Metrics.Testing;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Moq;
 
 namespace Microsoft.AspNetCore.Diagnostics;
 
-public class ExceptionHandlerMiddlewareTest
+public class ExceptionHandlerMiddlewareTest : LoggedTest
 {
     [Fact]
     public async Task ExceptionIsSetOnProblemDetailsContext()
@@ -210,7 +214,7 @@ public class ExceptionHandlerMiddlewareTest
         var middleware = CreateMiddleware(_ => Task.CompletedTask, optionsAccessor, exceptionHandlers, meterFactory);
         var meter = meterFactory.Meters.Single();
 
-        using var diagnosticsRequestExceptionRecorder = new InstrumentRecorder<long>(meterFactory, DiagnosticsMetrics.MeterName, "diagnostics-handler-exception");
+        using var diagnosticsRequestExceptionCollector = new MetricCollector<long>(meterFactory, DiagnosticsMetrics.MeterName, "aspnetcore.diagnostics.exceptions");
 
         // Act
         await middleware.Invoke(httpContext);
@@ -219,7 +223,7 @@ public class ExceptionHandlerMiddlewareTest
         Assert.Equal(DiagnosticsMetrics.MeterName, meter.Name);
         Assert.Null(meter.Version);
 
-        Assert.Empty(diagnosticsRequestExceptionRecorder.GetMeasurements());
+        Assert.Empty(diagnosticsRequestExceptionCollector.GetMeasurementSnapshot());
     }
 
     [Fact]
@@ -233,14 +237,14 @@ public class ExceptionHandlerMiddlewareTest
         var middleware = CreateMiddleware(_ => throw new InvalidOperationException(), optionsAccessor, exceptionHandlers, meterFactory);
         var meter = meterFactory.Meters.Single();
 
-        using var diagnosticsRequestExceptionRecorder = new InstrumentRecorder<long>(meterFactory, DiagnosticsMetrics.MeterName, "diagnostics-handler-exception");
+        using var diagnosticsRequestExceptionCollector = new MetricCollector<long>(meterFactory, DiagnosticsMetrics.MeterName, "aspnetcore.diagnostics.exceptions");
 
         // Act
         await middleware.Invoke(httpContext);
 
         // Assert
-        Assert.Collection(diagnosticsRequestExceptionRecorder.GetMeasurements(),
-            m => AssertRequestException(m, "System.InvalidOperationException", "Handled", typeof(TestExceptionHandler).FullName));
+        Assert.Collection(diagnosticsRequestExceptionCollector.GetMeasurementSnapshot(),
+            m => AssertRequestException(m, "System.InvalidOperationException", "handled", typeof(TestExceptionHandler).FullName));
     }
 
     [Fact]
@@ -255,14 +259,14 @@ public class ExceptionHandlerMiddlewareTest
         var middleware = CreateMiddleware(_ => throw new InvalidOperationException(), optionsAccessor, exceptionHandlers, meterFactory);
         var meter = meterFactory.Meters.Single();
 
-        using var diagnosticsRequestExceptionRecorder = new InstrumentRecorder<long>(meterFactory, DiagnosticsMetrics.MeterName, "diagnostics-handler-exception");
+        using var diagnosticsRequestExceptionCollector = new MetricCollector<long>(meterFactory, DiagnosticsMetrics.MeterName, "aspnetcore.diagnostics.exceptions");
 
         // Act
         await Assert.ThrowsAsync<InvalidOperationException>(() => middleware.Invoke(httpContext));
 
         // Assert
-        Assert.Collection(diagnosticsRequestExceptionRecorder.GetMeasurements(),
-            m => AssertRequestException(m, "System.InvalidOperationException", "Skipped"));
+        Assert.Collection(diagnosticsRequestExceptionCollector.GetMeasurementSnapshot(),
+            m => AssertRequestException(m, "System.InvalidOperationException", "skipped"));
     }
 
     private sealed class TestResponseFeature : HttpResponseFeature
@@ -280,14 +284,141 @@ public class ExceptionHandlerMiddlewareTest
         var middleware = CreateMiddleware(_ => throw new InvalidOperationException(), optionsAccessor, meterFactory: meterFactory);
         var meter = meterFactory.Meters.Single();
 
-        using var diagnosticsRequestExceptionRecorder = new InstrumentRecorder<long>(meterFactory, DiagnosticsMetrics.MeterName, "diagnostics-handler-exception");
+        using var diagnosticsRequestExceptionCollector = new MetricCollector<long>(meterFactory, DiagnosticsMetrics.MeterName, "aspnetcore.diagnostics.exceptions");
 
         // Act
         await middleware.Invoke(httpContext);
 
         // Assert
-        Assert.Collection(diagnosticsRequestExceptionRecorder.GetMeasurements(),
-            m => AssertRequestException(m, "System.InvalidOperationException", "Handled", null));
+        Assert.Collection(diagnosticsRequestExceptionCollector.GetMeasurementSnapshot(),
+            m => AssertRequestException(m, "System.InvalidOperationException", "handled", null));
+    }
+
+    [Fact]
+    public async Task Metrics_ExceptionThrown_Handled_UseOriginalRoute()
+    {
+        // Arrange
+        var originalEndpointBuilder = new RouteEndpointBuilder(c => Task.CompletedTask, RoutePatternFactory.Parse("/path"), 0);
+        var originalEndpoint = originalEndpointBuilder.Build();
+
+        var meterFactory = new TestMeterFactory();
+        using var requestDurationCollector = new MetricCollector<double>(meterFactory, "Microsoft.AspNetCore.Hosting", "http.server.request.duration");
+        using var requestExceptionCollector = new MetricCollector<long>(meterFactory, DiagnosticsMetrics.MeterName, "aspnetcore.diagnostics.exceptions");
+
+        using var host = new HostBuilder()
+            .ConfigureServices(s =>
+            {
+                s.AddSingleton<IMeterFactory>(meterFactory);
+                s.AddSingleton(LoggerFactory);
+            })
+            .ConfigureWebHost(webHostBuilder =>
+            {
+                webHostBuilder
+                .UseTestServer()
+                .Configure(app =>
+                {
+                    app.UseExceptionHandler(new ExceptionHandlerOptions
+                    {
+                        ExceptionHandler = (c) => Task.CompletedTask
+                    });
+                    app.Run(context =>
+                    {
+                        context.SetEndpoint(originalEndpoint);
+                        throw new Exception("Test exception");
+                    });
+
+                });
+            }).Build();
+
+        await host.StartAsync();
+
+        var server = host.GetTestServer();
+
+        // Act
+        var response = await server.CreateClient().GetAsync("/path");
+        Assert.Equal(HttpStatusCode.InternalServerError, response.StatusCode);
+
+        await requestDurationCollector.WaitForMeasurementsAsync(minCount: 1).DefaultTimeout();
+
+        // Assert
+        Assert.Collection(
+            requestDurationCollector.GetMeasurementSnapshot(),
+            m =>
+            {
+                Assert.True(m.Value > 0);
+                Assert.Equal(500, (int)m.Tags["http.response.status_code"]);
+                Assert.Equal("System.Exception", (string)m.Tags["error.type"]);
+                Assert.Equal("/path", (string)m.Tags["http.route"]);
+            });
+        Assert.Collection(requestExceptionCollector.GetMeasurementSnapshot(),
+            m => AssertRequestException(m, "System.Exception", "handled"));
+    }
+
+    [Fact]
+    public async Task Metrics_ExceptionThrown_Handled_UseNewRoute()
+    {
+        // Arrange
+        var originalEndpointBuilder = new RouteEndpointBuilder(c => Task.CompletedTask, RoutePatternFactory.Parse("/path"), 0);
+        var originalEndpoint = originalEndpointBuilder.Build();
+
+        var newEndpointBuilder = new RouteEndpointBuilder(c => Task.CompletedTask, RoutePatternFactory.Parse("/new"), 0);
+        var newEndpoint = newEndpointBuilder.Build();
+
+        var meterFactory = new TestMeterFactory();
+        using var requestDurationCollector = new MetricCollector<double>(meterFactory, "Microsoft.AspNetCore.Hosting", "http.server.request.duration");
+        using var requestExceptionCollector = new MetricCollector<long>(meterFactory, DiagnosticsMetrics.MeterName, "aspnetcore.diagnostics.exceptions");
+
+        using var host = new HostBuilder()
+            .ConfigureServices(s =>
+            {
+                s.AddSingleton<IMeterFactory>(meterFactory);
+                s.AddSingleton(LoggerFactory);
+            })
+            .ConfigureWebHost(webHostBuilder =>
+            {
+                webHostBuilder
+                .UseTestServer()
+                .Configure(app =>
+                {
+                    app.UseExceptionHandler(new ExceptionHandlerOptions
+                    {
+                        ExceptionHandler = (c) =>
+                        {
+                            c.SetEndpoint(newEndpoint);
+                            return Task.CompletedTask;
+                        }
+                    });
+                    app.Run(context =>
+                    {
+                        context.SetEndpoint(originalEndpoint);
+                        throw new Exception("Test exception");
+                    });
+
+                });
+            }).Build();
+
+        await host.StartAsync();
+
+        var server = host.GetTestServer();
+
+        // Act
+        var response = await server.CreateClient().GetAsync("/path");
+        Assert.Equal(HttpStatusCode.InternalServerError, response.StatusCode);
+
+        await requestDurationCollector.WaitForMeasurementsAsync(minCount: 1).DefaultTimeout();
+
+        // Assert
+        Assert.Collection(
+            requestDurationCollector.GetMeasurementSnapshot(),
+            m =>
+            {
+                Assert.True(m.Value > 0);
+                Assert.Equal(500, (int)m.Tags["http.response.status_code"]);
+                Assert.Equal("System.Exception", (string)m.Tags["error.type"]);
+                Assert.Equal("/new", (string)m.Tags["http.route"]);
+            });
+        Assert.Collection(requestExceptionCollector.GetMeasurementSnapshot(),
+            m => AssertRequestException(m, "System.Exception", "handled"));
     }
 
     [Fact]
@@ -304,28 +435,28 @@ public class ExceptionHandlerMiddlewareTest
         var middleware = CreateMiddleware(_ => throw new InvalidOperationException(), optionsAccessor, meterFactory: meterFactory);
         var meter = meterFactory.Meters.Single();
 
-        using var diagnosticsRequestExceptionRecorder = new InstrumentRecorder<long>(meterFactory, DiagnosticsMetrics.MeterName, "diagnostics-handler-exception");
+        using var diagnosticsRequestExceptionCollector = new MetricCollector<long>(meterFactory, DiagnosticsMetrics.MeterName, "aspnetcore.diagnostics.exceptions");
 
         // Act
         await Assert.ThrowsAsync<InvalidOperationException>(() => middleware.Invoke(httpContext));
 
         // Assert
-        Assert.Collection(diagnosticsRequestExceptionRecorder.GetMeasurements(),
-            m => AssertRequestException(m, "System.InvalidOperationException", "Unhandled"));
+        Assert.Collection(diagnosticsRequestExceptionCollector.GetMeasurementSnapshot(),
+            m => AssertRequestException(m, "System.InvalidOperationException", "unhandled"));
     }
 
-    private static void AssertRequestException(Measurement<long> measurement, string exceptionName, string result, string handler = null)
+    private static void AssertRequestException(CollectedMeasurement<long> measurement, string exceptionName, string result, string handler = null)
     {
         Assert.Equal(1, measurement.Value);
-        Assert.Equal(exceptionName, (string)measurement.Tags.ToArray().Single(t => t.Key == "exception-name").Value);
-        Assert.Equal(result, measurement.Tags.ToArray().Single(t => t.Key == "result").Value.ToString());
+        Assert.Equal(exceptionName, (string)measurement.Tags["error.type"]);
+        Assert.Equal(result, measurement.Tags["aspnetcore.diagnostics.exception.result"].ToString());
         if (handler == null)
         {
-            Assert.DoesNotContain(measurement.Tags.ToArray(), t => t.Key == "handler");
+            Assert.False(measurement.Tags.ContainsKey("aspnetcore.diagnostics.handler.type"));
         }
         else
         {
-            Assert.Equal(handler, (string)measurement.Tags.ToArray().Single(t => t.Key == "handler").Value);
+            Assert.Equal(handler, (string)measurement.Tags["aspnetcore.diagnostics.handler.type"]);
         }
     }
 

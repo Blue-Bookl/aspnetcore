@@ -14,7 +14,6 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
-using Microsoft.Extensions.Diagnostics.Metrics;
 using Microsoft.Extensions.Hosting;
 
 namespace Microsoft.AspNetCore.Hosting;
@@ -325,7 +324,7 @@ internal sealed class GenericWebHostBuilder : WebHostBuilderBase, ISupportsStart
             {
                 services.Configure<GenericWebHostServiceOptions>(options =>
                 {
-                    options.ConfigureApplication = app => configure(app);
+                    options.ConfigureApplication = configure;
                 });
             }
         });

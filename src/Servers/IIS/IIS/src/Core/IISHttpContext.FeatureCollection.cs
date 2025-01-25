@@ -4,7 +4,9 @@
 using System.Collections;
 using System.Diagnostics;
 using System.IO.Pipelines;
+using System.Net.Security;
 using System.Runtime.InteropServices;
+using System.Security.Authentication;
 using System.Security.Claims;
 using System.Security.Cryptography.X509Certificates;
 using Microsoft.AspNetCore.Connections.Features;
@@ -13,6 +15,7 @@ using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Http.Features.Authentication;
 using Microsoft.AspNetCore.Server.HttpSys;
 using Microsoft.AspNetCore.Server.IIS.Core.IO;
+using Microsoft.AspNetCore.Shared;
 using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.Extensions.Logging;
 
@@ -28,6 +31,7 @@ internal partial class IISHttpContext : IFeatureCollection,
                                         IHttpAuthenticationFeature,
                                         IServerVariablesFeature,
                                         ITlsConnectionFeature,
+                                        ITlsHandshakeFeature,
                                         IHttpBodyControlFeature,
                                         IHttpMaxRequestBodySizeFeature,
                                         IHttpResponseTrailersFeature,
@@ -282,10 +286,7 @@ internal partial class IISHttpContext : IFeatureCollection,
     {
         get
         {
-            if (string.IsNullOrEmpty(variableName))
-            {
-                throw new ArgumentException($"{nameof(variableName)} should be non-empty string");
-            }
+            ArgumentException.ThrowIfNullOrEmpty(variableName);
 
             // Synchronize access to native methods that might run in parallel with IO loops
             lock (_contextLock)
@@ -295,10 +296,7 @@ internal partial class IISHttpContext : IFeatureCollection,
         }
         set
         {
-            if (string.IsNullOrEmpty(variableName))
-            {
-                throw new ArgumentException($"{nameof(variableName)} should be non-empty string");
-            }
+            ArgumentException.ThrowIfNullOrEmpty(variableName);
 
             ArgumentNullException.ThrowIfNull(value);
 
@@ -406,6 +404,30 @@ internal partial class IISHttpContext : IFeatureCollection,
         }
     }
 
+    SslProtocols ITlsHandshakeFeature.Protocol => Protocol;
+
+    TlsCipherSuite? ITlsHandshakeFeature.NegotiatedCipherSuite => NegotiatedCipherSuite;
+
+    string ITlsHandshakeFeature.HostName => SniHostName;
+
+    [Obsolete(Obsoletions.RuntimeTlsCipherAlgorithmEnumsMessage, DiagnosticId = Obsoletions.RuntimeTlsCipherAlgorithmEnumsDiagId, UrlFormat = Obsoletions.RuntimeSharedUrlFormat)]
+    CipherAlgorithmType ITlsHandshakeFeature.CipherAlgorithm => CipherAlgorithm;
+
+    [Obsolete(Obsoletions.RuntimeTlsCipherAlgorithmEnumsMessage, DiagnosticId = Obsoletions.RuntimeTlsCipherAlgorithmEnumsDiagId, UrlFormat = Obsoletions.RuntimeSharedUrlFormat)]
+    int ITlsHandshakeFeature.CipherStrength => CipherStrength;
+
+    [Obsolete(Obsoletions.RuntimeTlsCipherAlgorithmEnumsMessage, DiagnosticId = Obsoletions.RuntimeTlsCipherAlgorithmEnumsDiagId, UrlFormat = Obsoletions.RuntimeSharedUrlFormat)]
+    HashAlgorithmType ITlsHandshakeFeature.HashAlgorithm => HashAlgorithm;
+
+    [Obsolete(Obsoletions.RuntimeTlsCipherAlgorithmEnumsMessage, DiagnosticId = Obsoletions.RuntimeTlsCipherAlgorithmEnumsDiagId, UrlFormat = Obsoletions.RuntimeSharedUrlFormat)]
+    int ITlsHandshakeFeature.HashStrength => HashStrength;
+
+    [Obsolete(Obsoletions.RuntimeTlsCipherAlgorithmEnumsMessage, DiagnosticId = Obsoletions.RuntimeTlsCipherAlgorithmEnumsDiagId, UrlFormat = Obsoletions.RuntimeSharedUrlFormat)]
+    ExchangeAlgorithmType ITlsHandshakeFeature.KeyExchangeAlgorithm => KeyExchangeAlgorithm;
+
+    [Obsolete(Obsoletions.RuntimeTlsCipherAlgorithmEnumsMessage, DiagnosticId = Obsoletions.RuntimeTlsCipherAlgorithmEnumsDiagId, UrlFormat = Obsoletions.RuntimeSharedUrlFormat)]
+    int ITlsHandshakeFeature.KeyExchangeStrength => KeyExchangeStrength;
+
     IEnumerator<KeyValuePair<Type, object>> IEnumerable<KeyValuePair<Type, object>>.GetEnumerator() => FastEnumerable().GetEnumerator();
 
     IEnumerator IEnumerable.GetEnumerator() => FastEnumerable().GetEnumerator();
@@ -444,6 +466,11 @@ internal partial class IISHttpContext : IFeatureCollection,
     internal IHttpResponseTrailersFeature? GetResponseTrailersFeature()
     {
         return AdvancedHttp2FeaturesSupported() ? this : null;
+    }
+
+    internal ITlsHandshakeFeature? GetTlsHandshakeFeature()
+    {
+        return IsHttps ? this : null;
     }
 
     IHeaderDictionary IHttpResponseTrailersFeature.Trailers

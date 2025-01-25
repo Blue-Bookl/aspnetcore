@@ -86,7 +86,7 @@ app.MapPost("/", (Todo todo, TestService svc) => $"{svc.TestServiceMethod()}, {t
         await VerifyResponseBodyAsync(httpContext, expectedBody);
     }
 
-        public static IEnumerable<object[]> BodyParamOptionalityData
+    public static IEnumerable<object[]> BodyParamOptionalityData
     {
         get
         {
@@ -98,6 +98,11 @@ app.MapPost("/", (Todo todo, TestService svc) => $"{svc.TestServiceMethod()}, {t
                 new object[] { @"(Todo? todo = null) => $""Todo: {todo?.Name}"";", true, false, "Todo: Default Todo"},
                 new object[] { @"(Todo? todo) => $""Todo: {todo?.Name}"";", false, false, "Todo: " },
                 new object[] { @"(Todo? todo) => $""Todo: {todo?.Name}"";", true, false, "Todo: Default Todo" },
+                new object[] { @"(TodoStruct todo) => $""Todo: {todo.Name}"";", true, false, "Todo: Default Todo"},
+                new object[] { @"(TodoStruct? todo = null) => $""Todo: {todo?.Name}"";", false, false, "Todo: "},
+                new object[] { @"(TodoStruct? todo = null) => $""Todo: {todo?.Name}"";", true, false, "Todo: Default Todo"},
+                new object[] { @"(TodoStruct? todo) => $""Todo: {todo?.Name}"";", false, false, "Todo: " },
+                new object[] { @"(TodoStruct? todo) => $""Todo: {todo?.Name}"";", true, false, "Todo: Default Todo" },
             };
         }
     }
@@ -197,5 +202,26 @@ app.MapPost("/", TestAction);
         var ex = await Assert.ThrowsAsync<BadHttpRequestException>(() => endpoint.RequestDelegate(httpContext));
         Assert.StartsWith("Implicit body inferred for parameter", ex.Message);
         Assert.EndsWith("but no body was provided. Did you mean to use a Service instead?", ex.Message);
+    }
+
+    [Fact]
+    public async Task SupportsResolvingImplicitServiceWithJsonSupportOn()
+    {
+        var source = """
+app.MapPost("/", (TestService svc) => svc.TestServiceMethod());
+""";
+        var (_, compilation) = await RunGeneratorAsync(source);
+        var serviceProvider = CreateServiceProvider((serviceCollection) =>
+        {
+            serviceCollection.ConfigureHttpJsonOptions(o => o.SerializerOptions.TypeInfoResolver = SharedTestJsonContext.Default);
+            serviceCollection.AddSingleton(new TestService());
+        });
+        var endpoint = GetEndpointFromCompilation(compilation, serviceProvider: serviceProvider);
+
+        var httpContext = CreateHttpContext(serviceProvider);
+
+        await endpoint.RequestDelegate(httpContext);
+
+        await VerifyResponseBodyAsync(httpContext, "Produced from service!");
     }
 }

@@ -2,7 +2,7 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using System.Diagnostics;
-using Microsoft.AspNetCore.Components.Binding;
+using Microsoft.AspNetCore.Components.Forms.Mapping;
 using Microsoft.AspNetCore.Components.Rendering;
 
 namespace Microsoft.AspNetCore.Components.Forms;
@@ -47,6 +47,15 @@ public class EditForm : ComponentBase
     }
 
     /// <summary>
+    /// If enabled, form submission is performed without fully reloading the page. This is
+    /// equivalent to adding <code>data-enhance</code> to the form.
+    ///
+    /// This flag is only relevant in server-side rendering (SSR) scenarios. For interactive
+    /// rendering, the flag has no effect since there is no full-page reload on submit anyway.
+    /// </summary>
+    [Parameter] public bool Enhance { get; set; }
+
+    /// <summary>
     /// Specifies the top-level model object for the form. An edit context will
     /// be constructed for this model. If using this parameter, do not also supply
     /// a value for <see cref="EditContext"/>.
@@ -78,19 +87,13 @@ public class EditForm : ComponentBase
     /// </summary>
     [Parameter] public EventCallback<EditContext> OnInvalidSubmit { get; set; }
 
-    /// <summary>
-    /// Gets the context associated with data bound to the EditContext in this form.
-    /// </summary>
-    [CascadingParameter] public ModelBindingContext? BindingContext { get; set; }
+    [CascadingParameter] private FormMappingContext? MappingContext { get; set; }
 
     /// <summary>
-    /// Gets or sets the form name.
+    /// Gets or sets the form handler name. This is required for posting it to a server-side endpoint.
+    /// It is not used during interactive rendering.
     /// </summary>
-    /// <remarks>
-    /// The <c>name</c> attribute on the <c>form</c> element will default to
-    /// the <see cref="FormHandlerName"/> unless an explicit name is provided.
-    /// </remarks>
-    [Parameter] public string? FormHandlerName { get; set; }
+    [Parameter] public string? FormName { get; set; }
 
     /// <inheritdoc />
     protected override void OnParametersSet()
@@ -122,11 +125,6 @@ public class EditForm : ComponentBase
         {
             _editContext = new EditContext(Model!);
         }
-
-        if (_editContext != null && BindingContext != null)
-        {
-            _editContext.SetConvertibleValues(BindingContext);
-        }
     }
 
     /// <inheritdoc />
@@ -139,51 +137,56 @@ public class EditForm : ComponentBase
         // optimizing for the common case where _editContext never changes.
         builder.OpenRegion(_editContext.GetHashCode());
 
-        if (FormHandlerName != null)
+        builder.OpenElement(0, "form");
+
+        if (MappingContext != null)
         {
-            builder.OpenComponent<CascadingModelBinder>(0);
-            builder.AddComponentParameter(1, nameof(CascadingModelBinder.Name), FormHandlerName);
-            builder.AddComponentParameter(2, nameof(CascadingModelBinder.ChildContent), (RenderFragment<ModelBindingContext>)RenderWithNamedContext);
-            builder.CloseComponent();
+            builder.AddAttribute(2, "method", "post");
         }
-        else
+
+        if (Enhance)
         {
-            RenderFormContents(builder, BindingContext);
+            builder.AddAttribute(3, "data-enhance", "");
         }
+
+        builder.AddMultipleAttributes(4, AdditionalAttributes);
+        builder.AddAttribute(5, "onsubmit", _handleSubmitDelegate);
+
+        // In SSR cases, we register onsubmit as a named event and emit other child elements
+        // to include the handler and antiforgery token in the post data
+        if (MappingContext != null)
+        {
+            if (!string.IsNullOrEmpty(FormName))
+            {
+                builder.AddNamedEvent("onsubmit", FormName);
+            }
+
+            RenderSSRFormHandlingChildren(builder, 6);
+        }
+
+        builder.OpenComponent<CascadingValue<EditContext>>(7);
+        builder.AddComponentParameter(7, "IsFixed", true);
+        builder.AddComponentParameter(8, "Value", _editContext);
+        builder.AddComponentParameter(9, "ChildContent", ChildContent?.Invoke(_editContext));
+        builder.CloseComponent();
+
+        builder.CloseElement();
 
         builder.CloseRegion();
+    }
 
-        RenderFragment RenderWithNamedContext(ModelBindingContext context)
-        {
-            return builder => RenderFormContents(builder, context);
-        }
+    private void RenderSSRFormHandlingChildren(RenderTreeBuilder builder, int sequence)
+    {
+        builder.OpenRegion(sequence);
 
-        void RenderFormContents(RenderTreeBuilder builder, ModelBindingContext? bindingContext)
-        {
-            builder.OpenElement(0, "form");
-            if (!string.IsNullOrEmpty(bindingContext?.Name))
-            {
-                builder.AddAttribute(1, "name", bindingContext.Name);
-            }
+        builder.OpenComponent<FormMappingValidator>(1);
+        builder.AddComponentParameter(2, nameof(FormMappingValidator.CurrentEditContext), EditContext);
+        builder.CloseComponent();
 
-            if (!string.IsNullOrEmpty(bindingContext?.BindingContextId))
-            {
-                builder.AddAttribute(2, "action", bindingContext.BindingContextId);
-            }
+        builder.OpenComponent<AntiforgeryToken>(3);
+        builder.CloseComponent();
 
-            builder.AddMultipleAttributes(3, AdditionalAttributes);
-            builder.AddAttribute(4, "onsubmit", _handleSubmitDelegate);
-            if (bindingContext != null)
-            {
-                builder.SetEventHandlerName(bindingContext.Name);
-            }
-            builder.OpenComponent<CascadingValue<EditContext>>(5);
-            builder.AddComponentParameter(6, "IsFixed", true);
-            builder.AddComponentParameter(7, "Value", _editContext);
-            builder.AddComponentParameter(8, "ChildContent", ChildContent?.Invoke(_editContext));
-            builder.CloseComponent();
-            builder.CloseElement();
-        }
+        builder.CloseRegion();
     }
 
     private async Task HandleSubmitAsync()
