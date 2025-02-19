@@ -4,7 +4,7 @@
 using System.Diagnostics.Metrics;
 using Microsoft.Extensions.Diagnostics.Metrics;
 
-namespace Microsoft.AspNetCore.Testing;
+namespace Microsoft.AspNetCore.InternalTesting;
 
 internal sealed class TestMeterFactory : IMeterFactory
 {
@@ -25,49 +25,5 @@ internal sealed class TestMeterFactory : IMeterFactory
         }
 
         Meters.Clear();
-    }
-}
-
-internal sealed class MeasurementReporter<T> : IDisposable where T : struct
-{
-    private readonly string _meterName;
-    private readonly string _instrumentName;
-    private readonly List<Action<Measurement<T>>> _callbacks;
-    private readonly MeterListener _meterListener;
-
-    public MeasurementReporter(IMeterFactory factory, string meterName, string instrumentName, object state = null)
-    {
-        _meterName = meterName;
-        _instrumentName = instrumentName;
-        _callbacks = new List<Action<Measurement<T>>>();
-        _meterListener = new MeterListener();
-        _meterListener.InstrumentPublished = (instrument, listener) =>
-        {
-            if (instrument.Meter.Name == _meterName && instrument.Meter.Scope == factory && instrument.Name == _instrumentName)
-            {
-                listener.EnableMeasurementEvents(instrument, state);
-            }
-        };
-        _meterListener.SetMeasurementEventCallback<T>(OnMeasurementRecorded);
-        _meterListener.Start();
-    }
-
-    private void OnMeasurementRecorded(Instrument instrument, T measurement, ReadOnlySpan<KeyValuePair<string, object>> tags, object state)
-    {
-        var m = new Measurement<T>(measurement, tags);
-        foreach (var callback in _callbacks)
-        {
-            callback(m);
-        }
-    }
-
-    public void Register(Action<Measurement<T>> callback)
-    {
-        _callbacks.Add(callback);
-    }
-
-    public void Dispose()
-    {
-        _meterListener.Dispose();
     }
 }
